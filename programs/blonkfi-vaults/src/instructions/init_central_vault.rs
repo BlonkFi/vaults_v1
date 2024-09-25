@@ -1,9 +1,10 @@
 use crate::state::central_vault::CentralVault;
 use anchor_lang::prelude::*;
+use std::mem::size_of;
 
 #[derive(Accounts)]
 pub struct InitCentralVault<'info> {
-    #[account(init, payer = authority, space = 8 + CentralVault::LEN)]
+    #[account(init, payer = authority, space = size_of::<CentralVault>() + 8)]
     pub central_vault: Account<'info, CentralVault>,
     #[account(mut)]
     pub authority: Signer<'info>,
