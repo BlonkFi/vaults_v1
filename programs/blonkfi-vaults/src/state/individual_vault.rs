@@ -33,11 +33,9 @@ impl IndividualVault {
         self.multisig_address = multisig_address;
         self.central_vault_address = central_vault_address;
 
-        // Initialize the receipt token mint
         let receipt_mint_key = receipt_mint.key();
         self.receipt_mint = receipt_mint_key;
 
-        // CPI: Call to initialize the new receipt token mint using SPL Token Program
         let cpi_accounts = InitializeMint {
             mint: receipt_mint.to_account_info(),
             rent: rent.to_account_info(),
@@ -45,7 +43,6 @@ impl IndividualVault {
 
         let cpi_context = CpiContext::new(token_program.to_account_info(), cpi_accounts);
 
-        // Idenitfy the decimals of the asset token
         let asset_mint_decimals = asset_mint.decimals;
 
         token::initialize_mint(cpi_context, asset_mint_decimals, &vault_address, None)?;
@@ -64,13 +61,11 @@ impl IndividualVault {
         receipt_mint: &mut Account<'info, Mint>,
         vault: &AccountInfo<'info>,
     ) -> Result<()> {
-        // Ensure only the vault's supported token (asset_mint) is deposited
         require!(
             depositor_token_account.mint == self.asset_mint,
             VaultError::InvalidTokenMint
         );
 
-        // Transfer the deposited SPL tokens to the vault's token account
         token::transfer(
             CpiContext::new(
                 token_program.to_account_info(),
@@ -83,10 +78,8 @@ impl IndividualVault {
             amount,
         )?;
 
-        // Calculate the number of receipt tokens to issue
         let shares_to_issue = self.calculate_shares(amount, self.total_assets);
 
-        // Mint receipt tokens to the depositor's receipt token account
         token::mint_to(
             CpiContext::new(
                 token_program.to_account_info(),
@@ -99,7 +92,6 @@ impl IndividualVault {
             shares_to_issue,
         )?;
 
-        // Update the vault state
         self.total_assets += amount;
         self.total_shares += shares_to_issue;
 
@@ -116,17 +108,14 @@ impl IndividualVault {
         receipt_mint: &mut Account<'info, Mint>,
         vault: &AccountInfo<'info>,
     ) -> Result<()> {
-        // Ensure the lock-in period has passed
         require!(
             Clock::get()?.unix_timestamp >= self.locked_until,
             VaultError::LockPeriodNotOver
         );
 
-        // Calculate the amount to withdraw based on the number of receipt tokens burned
         let amount_to_withdraw =
             self.calculate_withdrawal_amount(shares_to_burn, self.total_assets, self.total_shares);
 
-        // Burn the receipt tokens
         token::burn(
             CpiContext::new(
                 token_program.to_account_info(),
@@ -139,7 +128,6 @@ impl IndividualVault {
             shares_to_burn,
         )?;
 
-        // Transfer the corresponding asset tokens from the vault to the user
         token::transfer(
             CpiContext::new(
                 token_program.to_account_info(),
@@ -152,7 +140,6 @@ impl IndividualVault {
             amount_to_withdraw,
         )?;
 
-        // Update the vault state
         self.total_assets -= amount_to_withdraw;
         self.total_shares -= shares_to_burn;
 

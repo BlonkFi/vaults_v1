@@ -6,7 +6,7 @@ use anchor_spl::token::{Mint, Token, TokenAccount};
 #[derive(Accounts)]
 pub struct DepositIntoVault<'info> {
     #[account(mut)]
-    pub depositor: Signer<'info>, // The user depositing tokens
+    pub depositor: Signer<'info>,
 
     #[account(
         mut,

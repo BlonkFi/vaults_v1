@@ -6,13 +6,13 @@ use std::mem::size_of;
 #[derive(Accounts)]
 pub struct InitIndividualVault<'info> {
     #[account(mut)]
-    pub authority: Signer<'info>, // The admin authority initializing the individual vault
+    pub authority: Signer<'info>,
     #[account(
         init,
         payer = authority,
         space = size_of::<IndividualVault>() + 8
     )]
-    pub vault: Account<'info, IndividualVault>, // The individual vault being initialized
+    pub vault: Account<'info, IndividualVault>,
 
     #[account(
         init,
@@ -22,13 +22,13 @@ pub struct InitIndividualVault<'info> {
         seeds = [b"receipt-mint", vault.key().as_ref()],
         bump
     )]
-    pub receipt_mint: Account<'info, Mint>, // The receipt token mint account
+    pub receipt_mint: Account<'info, Mint>,
 
     #[account()]
-    pub asset_mint: Account<'info, Mint>, // The asset token's mint account (e.g., USDC)
-    pub system_program: Program<'info, System>, // System program to create accounts
-    pub token_program: Program<'info, Token>,   // Token program for SPL token operations
-    pub rent: Sysvar<'info, Rent>,              // Rent system variable
+    pub asset_mint: Account<'info, Mint>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub rent: Sysvar<'info, Rent>,
 }
 
 pub fn handler(
@@ -58,12 +58,7 @@ pub fn handler(
     };
     let cpi_context = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
 
-    token::initialize_mint(
-        cpi_context,
-        6,                         // Set decimals to match the underlying asset (e.g., 6 for USDC)
-        &ctx.accounts.vault.key(), // The vault is the mint authority for the receipt token
-        None,                      // No freeze authority
-    )?;
+    token::initialize_mint(cpi_context, 6, &ctx.accounts.vault.key(), None)?;
 
     Ok(())
 }
