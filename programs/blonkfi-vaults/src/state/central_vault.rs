@@ -35,34 +35,6 @@ impl CentralVault {
         Ok(())
     }
 
-    /// Calculates the total assets across all individual vaults dynamically.
-    /// This function queries each individual vault and aggregates its assets.
-    pub fn calculate_total_assets(&self, vault_infos: Vec<AccountInfo<'_>>) -> Result<u64> {
-        let mut total_assets = 0u64;
-
-        for vault_info in vault_infos.iter() {
-            let individual_vault: IndividualVault = Account::try_from(vault_info)?;
-
-            total_assets += individual_vault.total_assets;
-        }
-
-        Ok(total_assets)
-    }
-
-    /// Calculates the total shares across all individual vaults dynamically.
-    /// This function queries each individual vault and aggregates its total shares.
-    pub fn calculate_total_shares(&self, vault_infos: Vec<AccountInfo<'_>>) -> Result<u64> {
-        let mut total_shares = 0u64;
-
-        for vault_info in vault_infos.iter() {
-            let individual_vault: IndividualVault = Account::try_from(vault_info)?;
-
-            total_shares += individual_vault.total_shares;
-        }
-
-        Ok(total_shares)
-    }
-
     /// Returns the number of vaults under management
     pub fn get_vault_count(&self) -> usize {
         self.vault_addresses.len()
