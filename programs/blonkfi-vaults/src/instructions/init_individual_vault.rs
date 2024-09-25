@@ -1,16 +1,16 @@
 use crate::state::individual_vault::IndividualVault;
 use anchor_lang::prelude::*;
-use anchor_spl::token::{InitializeMint, Mint, Token};
-use solana_program::clock::Clock;
+use anchor_spl::token::{self, InitializeMint, Mint, Token};
+use std::mem::size_of;
 
 #[derive(Accounts)]
-pub struct InitializeIndividualVault<'info> {
+pub struct InitIndividualVault<'info> {
     #[account(mut)]
     pub authority: Signer<'info>, // The admin authority initializing the individual vault
     #[account(
         init,
         payer = authority,
-        space = 8 + IndividualVault::LEN
+        space = size_of::<IndividualVault>() + 8
     )]
     pub vault: Account<'info, IndividualVault>, // The individual vault being initialized
 
@@ -31,21 +31,24 @@ pub struct InitializeIndividualVault<'info> {
     pub rent: Sysvar<'info, Rent>,              // Rent system variable
 }
 
-pub fn initialize_individual_vault(
-    ctx: Context<InitializeIndividualVault>,
-    asset_mint: Pubkey,
+pub fn handler(
+    ctx: Context<InitIndividualVault>,
     multisig_address: Pubkey,
     central_vault_address: Pubkey,
+    vault_address: Pubkey,
     lock_period: i64,
 ) -> Result<()> {
     let individual_vault = &mut ctx.accounts.vault;
 
     individual_vault.initialize(
-        ctx,
-        ctx.accounts.asset_mint.key(),
+        &mut ctx.accounts.receipt_mint,
+        &mut ctx.accounts.asset_mint,
         multisig_address,
         central_vault_address,
+        vault_address,
         lock_period,
+        &ctx.accounts.token_program,
+        &ctx.accounts.rent.to_account_info(),
     )?;
 
     // CPI: Call to initialize the new receipt token mint
@@ -57,9 +60,9 @@ pub fn initialize_individual_vault(
 
     token::initialize_mint(
         cpi_context,
-        6,                        // Set decimals to match the underlying asset (e.g., 6 for USDC)
-        ctx.accounts.vault.key(), // The vault is the mint authority for the receipt token
-        None,                     // No freeze authority
+        6,                         // Set decimals to match the underlying asset (e.g., 6 for USDC)
+        &ctx.accounts.vault.key(), // The vault is the mint authority for the receipt token
+        None,                      // No freeze authority
     )?;
 
     Ok(())
