@@ -1,5 +1,6 @@
+use crate::utils::VaultError;
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Burn, InitializeMint, Mint, MintTo, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, InitializeMint, Mint, Token, TokenAccount};
 use solana_program::clock::Clock;
 
 #[account]
@@ -14,15 +15,18 @@ pub struct IndividualVault {
 }
 
 impl IndividualVault {
-    pub fn initialize(
+    pub fn initialize<'info>(
         &mut self,
-        ctx: Context<InitializeVault>,
-        asset_mint: Pubkey,
+        receipt_mint: &mut Account<'info, Mint>,
+        asset_mint: &mut Account<'info, Mint>,
         multisig_address: Pubkey,
         central_vault_address: Pubkey,
+        vault_address: Pubkey,
         lock_period: i64,
+        token_program: &Program<'info, Token>,
+        rent: &AccountInfo<'info>,
     ) -> Result<()> {
-        self.asset_mint = asset_mint;
+        self.asset_mint = asset_mint.key();
         self.total_assets = 0;
         self.total_shares = 0;
         self.locked_until = Clock::get()?.unix_timestamp + lock_period;
@@ -30,65 +34,66 @@ impl IndividualVault {
         self.central_vault_address = central_vault_address;
 
         // Initialize the receipt token mint
-        let receipt_mint_key = ctx.accounts.receipt_mint.key();
+        let receipt_mint_key = receipt_mint.key();
         self.receipt_mint = receipt_mint_key;
 
         // CPI: Call to initialize the new receipt token mint using SPL Token Program
         let cpi_accounts = InitializeMint {
-            mint: ctx.accounts.receipt_mint.to_account_info(),
-            rent: ctx.accounts.rent.to_account_info(),
+            mint: receipt_mint.to_account_info(),
+            rent: rent.to_account_info(),
         };
 
-        let cpi_context =
-            CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+        let cpi_context = CpiContext::new(token_program.to_account_info(), cpi_accounts);
 
         // Idenitfy the decimals of the asset token
-        let asset_mint_decimals = ctx.accounts.asset_mint.decimals;
+        let asset_mint_decimals = asset_mint.decimals;
 
-        token::initialize_mint(
-            cpi_context,
-            asset_mint_decimals,
-            ctx.accounts.vault.key(),
-            None,
-        )?;
+        token::initialize_mint(cpi_context, asset_mint_decimals, &vault_address, None)?;
 
         Ok(())
     }
 
-    pub fn deposit_tokens(&mut self, ctx: Context<DepositTokens>, amount: u64) -> Result<()> {
+    pub fn deposit_tokens<'info>(
+        &mut self,
+        depositor: &mut Signer<'info>,
+        depositor_token_account: &mut Account<'info, TokenAccount>,
+        depositor_receipt_token_account: &mut Account<'info, TokenAccount>,
+        vault_token_account: &mut Account<'info, TokenAccount>,
+        token_program: &Program<'info, Token>,
+        amount: u64,
+        receipt_mint: &mut Account<'info, Mint>,
+        vault: &AccountInfo<'info>,
+    ) -> Result<()> {
         // Ensure only the vault's supported token (asset_mint) is deposited
         require!(
-            ctx.accounts.depositor_token_account.mint == self.asset_mint,
+            depositor_token_account.mint == self.asset_mint,
             VaultError::InvalidTokenMint
         );
 
         // Transfer the deposited SPL tokens to the vault's token account
         token::transfer(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
+                token_program.to_account_info(),
                 token::Transfer {
-                    from: ctx.accounts.depositor_token_account.to_account_info(),
-                    to: ctx.accounts.vault_token_account.to_account_info(),
-                    authority: ctx.accounts.depositor.to_account_info(),
+                    from: depositor_token_account.to_account_info(),
+                    to: vault_token_account.to_account_info(),
+                    authority: depositor.to_account_info(),
                 },
             ),
             amount,
         )?;
 
         // Calculate the number of receipt tokens to issue
-        let shares_to_issue = calculate_shares(amount, self.total_assets);
+        let shares_to_issue = self.calculate_shares(amount, self.total_assets);
 
         // Mint receipt tokens to the depositor's receipt token account
         token::mint_to(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
+                token_program.to_account_info(),
                 token::MintTo {
-                    mint: self.receipt_mint.to_account_info(),
-                    to: ctx
-                        .accounts
-                        .depositor_receipt_token_account
-                        .to_account_info(),
-                    authority: ctx.accounts.vault.to_account_info(),
+                    mint: receipt_mint.to_account_info(),
+                    to: depositor_receipt_token_account.to_account_info(),
+                    authority: vault.clone(),
                 },
             ),
             shares_to_issue,
@@ -101,10 +106,15 @@ impl IndividualVault {
         Ok(())
     }
 
-    pub fn withdraw_tokens(
+    pub fn withdraw_tokens<'info>(
         &mut self,
-        ctx: Context<WithdrawTokens>,
+        withdrawer: &mut Signer<'info>,
+        depositor_receipt_token_account: &mut Account<'info, TokenAccount>,
+        vault_token_account: &mut Account<'info, TokenAccount>,
+        token_program: &Program<'info, Token>,
         shares_to_burn: u64,
+        receipt_mint: &mut Account<'info, Mint>,
+        vault: &AccountInfo<'info>,
     ) -> Result<()> {
         // Ensure the lock-in period has passed
         require!(
@@ -114,19 +124,16 @@ impl IndividualVault {
 
         // Calculate the amount to withdraw based on the number of receipt tokens burned
         let amount_to_withdraw =
-            calculate_withdrawal_amount(shares_to_burn, self.total_assets, self.total_shares);
+            self.calculate_withdrawal_amount(shares_to_burn, self.total_assets, self.total_shares);
 
         // Burn the receipt tokens
         token::burn(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
+                token_program.to_account_info(),
                 token::Burn {
-                    mint: self.receipt_mint.to_account_info(),
-                    to: ctx
-                        .accounts
-                        .depositor_receipt_token_account
-                        .to_account_info(),
-                    authority: ctx.accounts.depositor.to_account_info(),
+                    mint: receipt_mint.to_account_info(),
+                    from: depositor_receipt_token_account.to_account_info().clone(),
+                    authority: vault.clone(),
                 },
             ),
             shares_to_burn,
@@ -135,11 +142,11 @@ impl IndividualVault {
         // Transfer the corresponding asset tokens from the vault to the user
         token::transfer(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
+                token_program.to_account_info(),
                 token::Transfer {
-                    from: ctx.accounts.vault_token_account.to_account_info(),
-                    to: ctx.accounts.depositor_token_account.to_account_info(),
-                    authority: ctx.accounts.vault.to_account_info(),
+                    from: vault_token_account.to_account_info(),
+                    to: withdrawer.to_account_info(),
+                    authority: vault.to_account_info(),
                 },
             ),
             amount_to_withdraw,
@@ -150,5 +157,33 @@ impl IndividualVault {
         self.total_shares -= shares_to_burn;
 
         Ok(())
+    }
+    fn calculate_shares(&self, deposit_amount: u64, total_assets: u64) -> u64 {
+        if total_assets == 0 {
+            deposit_amount
+        } else {
+            (deposit_amount * self.total_shares) / self.total_assets
+        }
+    }
+
+    fn calculate_withdrawal_amount(
+        &self,
+        shares_to_burn: u64,
+        total_assets: u64,
+        total_shares: u64,
+    ) -> u64 {
+        if total_shares == 0 {
+            shares_to_burn
+        } else {
+            (shares_to_burn * total_assets) / total_shares
+        }
+    }
+
+    pub fn get_total_assets(&self) -> u64 {
+        self.total_assets
+    }
+
+    pub fn get_total_shares(&self) -> u64 {
+        self.total_shares
     }
 }
