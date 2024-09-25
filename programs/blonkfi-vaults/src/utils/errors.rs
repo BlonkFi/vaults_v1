@@ -8,4 +8,8 @@ pub enum VaultError {
     MaxVaultsReached,
     #[msg("Invalid token mint")]
     InvalidTokenMint,
+    #[msg("Lock period not over")]
+    LockPeriodNotOver,
+    #[msg("Vault not found")]
+    VaultNotFound,
 }
