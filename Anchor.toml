@@ -1,7 +1,7 @@
 [toolchain]
 
 [features]
-seeds = false
+seeds = true
 skip-lint = false
 
 [programs.localnet]
@@ -16,3 +16,9 @@ wallet = "/Users/yudhishthra/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+
+[test.validator]
+url = "https://mainnet.helius-rpc.com/?api-key=e8d89710-2b92-45e9-8772-6b3ea43341ec"
+
+[[test.validator.clone]]
+address = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
