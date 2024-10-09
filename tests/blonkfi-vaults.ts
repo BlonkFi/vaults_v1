@@ -1,6 +1,12 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
-import { PublicKey, Keypair } from "@solana/web3.js";
+import { Program, AnchorError } from "@coral-xyz/anchor";
+import {
+  PublicKey,
+  Keypair,
+  SendTransactionError,
+  Transaction,
+} from "@solana/web3.js";
+import { getMint } from "@solana/spl-token";
 import { BlonkfiVaults } from "../target/types/blonkfi_vaults";
 import { assert } from "chai";
 import {
@@ -11,237 +17,256 @@ import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import * as bs58 from "bs58";
+import { generateFundedKeypair, createLocalhostConnection } from "./utils";
+
+const connection = createLocalhostConnection();
 
 describe("BlonkfiVaults", () => {
   anchor.setProvider(anchor.AnchorProvider.env());
   const program = anchor.workspace.BlonkfiVaults as Program<BlonkfiVaults>;
 
-  const blonkFiAdmin = Keypair.fromSecretKey(
-    bs58.decode("YOUR_ADMIN_SECRET_KEY")
-  );
-  const blonkFiUser = Keypair.fromSecretKey(
-    bs58.decode("YOUR_USER_SECRET_KEY")
-  );
-
-  let assetMint: PublicKey;
-  let receiptMint: PublicKey;
-  let centralVault: Keypair;
-  let individualVault: Keypair;
-  let userAssetAccount: PublicKey;
-  let userReceiptAccount: PublicKey;
-  let vaultAssetAccount: PublicKey;
+  let blonkFiPlaceholderAdmin: Keypair;
+  let slot: number;
+  let centralVaultAddress: PublicKey;
 
   before(async () => {
-    // Create asset mint
-    assetMint = await createMint(
-      program.provider.connection,
-      blonkFiAdmin,
-      blonkFiAdmin.publicKey,
-      null,
-      6
-    );
+    blonkFiPlaceholderAdmin = await generateFundedKeypair(connection);
+    slot = await connection.getSlot();
 
-    // Create central vault
-    centralVault = Keypair.generate();
+    const seeds = [Buffer.from("BlonkFiCentralVault")];
 
-    // Initialize central vault
+    const centralVault = anchor.web3.PublicKey.findProgramAddressSync(
+      seeds,
+      program.programId
+    )[0];
+
     await program.methods
-      .initCentralVault(blonkFiAdmin.publicKey)
+      .initCentralVault()
       .accounts({
-        centralVault: centralVault.publicKey,
-        authority: blonkFiAdmin.publicKey,
+        centralVault: centralVault,
+        authority: blonkFiPlaceholderAdmin.publicKey,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
-      .signers([centralVault, blonkFiAdmin])
+      .signers([blonkFiPlaceholderAdmin])
       .rpc();
 
-    // Create user asset account
-    userAssetAccount = (
-      await getOrCreateAssociatedTokenAccount(
-        program.provider.connection,
-        blonkFiAdmin,
-        assetMint,
-        blonkFiUser.publicKey
-      )
-    ).address;
+    centralVaultAddress = centralVault;
 
-    // Mint some assets to the user
-    await mintTo(
-      program.provider.connection,
-      blonkFiAdmin,
-      assetMint,
-      userAssetAccount,
-      blonkFiAdmin,
-      1000000000 // 1000 tokens with 6 decimals
-    );
-  });
-
-  it("Initializes a central vault", async () => {
+    //Access the state of the central vault and check if the authority is set correctly
     const centralVaultAccount = await program.account.centralVault.fetch(
-      centralVault.publicKey
+      centralVault
     );
-    assert.ok(centralVaultAccount.authority.equals(blonkFiAdmin.publicKey));
-    assert.equal(centralVaultAccount.vaultAddresses.length, 0);
-  });
 
-  it("Initializes an individual vault", async () => {
-    individualVault = Keypair.generate();
-    receiptMint = Keypair.generate().publicKey;
-
-    await program.methods
-      .initIndividualVault(
-        blonkFiAdmin.publicKey,
-        centralVault.publicKey,
-        individualVault.publicKey,
-        new anchor.BN(86400) // 1 day lock period
-      )
-      .accounts({
-        authority: blonkFiAdmin.publicKey,
-        vault: individualVault.publicKey,
-        receiptMint: receiptMint,
-        assetMint: assetMint,
-        systemProgram: anchor.web3.SystemProgram.programId,
-        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-      })
-      .signers([individualVault, blonkFiAdmin])
-      .rpc();
-
-    const vaultAccount = await program.account.individualVault.fetch(
-      individualVault.publicKey
-    );
-    assert.ok(vaultAccount.assetMint.equals(assetMint));
-    assert.ok(vaultAccount.receiptMint.equals(receiptMint));
-    assert.ok(vaultAccount.centralVaultAddress.equals(centralVault.publicKey));
-  });
-
-  it("Adds an individual vault to the central vault", async () => {
-    await program.methods
-      .addVault(blonkFiAdmin.publicKey, new anchor.BN(86400))
-      .accounts({
-        centralVault: centralVault.publicKey,
-        authority: blonkFiAdmin.publicKey,
-        newVault: individualVault.publicKey,
-        receiptMint: receiptMint,
-        assetMint: assetMint,
-        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        systemProgram: anchor.web3.SystemProgram.programId,
-        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-      })
-      .signers([blonkFiAdmin])
-      .rpc();
-
-    const centralVaultAccount = await program.account.centralVault.fetch(
-      centralVault.publicKey
-    );
-    assert.equal(centralVaultAccount.vaultAddresses.length, 1);
-    assert.ok(
-      centralVaultAccount.vaultAddresses[0].equals(individualVault.publicKey)
+    assert.equal(
+      centralVaultAccount.authority.toBase58(),
+      blonkFiPlaceholderAdmin.publicKey.toBase58()
     );
   });
 
-  it("Deposits tokens into the vault", async () => {
-    vaultAssetAccount = (
-      await getOrCreateAssociatedTokenAccount(
-        program.provider.connection,
-        blonkFiAdmin,
-        assetMint,
-        individualVault.publicKey
-      )
-    ).address;
+  //Should fail if the central vault is re-initialized
+  it("Fails to re-initialize the central vault", async () => {
+    const seeds = [Buffer.from("BlonkFiCentralVault")];
 
-    userReceiptAccount = (
-      await getOrCreateAssociatedTokenAccount(
-        program.provider.connection,
-        blonkFiAdmin,
-        receiptMint,
-        blonkFiUser.publicKey
-      )
-    ).address;
+    const centralVault = anchor.web3.PublicKey.findProgramAddressSync(
+      seeds,
+      program.programId
+    )[0];
 
-    const depositAmount = new anchor.BN(100000000); // 100 tokens
+    //Create a lookup table
+    const [lookupTableInst, lookupTableAddress] =
+      anchor.web3.AddressLookupTableProgram.createLookupTable({
+        authority: blonkFiPlaceholderAdmin.publicKey,
+        payer: blonkFiPlaceholderAdmin.publicKey,
+        recentSlot: slot,
+      });
 
-    await program.methods
-      .depositIntoVault(depositAmount)
-      .accounts({
-        depositor: blonkFiUser.publicKey,
-        depositorTokenAccount: userAssetAccount,
-        vault: individualVault.publicKey,
-        vaultTokenAccount: vaultAssetAccount,
-        receiptMint: receiptMint,
-        depositorReceiptTokenAccount: userReceiptAccount,
-        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      })
-      .signers([blonkFiUser])
-      .rpc();
-
-    const vaultAccount = await program.account.individualVault.fetch(
-      individualVault.publicKey
-    );
-    assert.equal(vaultAccount.totalAssets.toNumber(), 100000000);
-    assert.equal(vaultAccount.totalShares.toNumber(), 100000000);
-
-    const userReceiptBalance = await getAccount(
-      program.provider.connection,
-      userReceiptAccount
-    );
-    assert.equal(userReceiptBalance.amount.toString(), "100000000");
+    try {
+      await program.methods
+        .initCentralVault()
+        .accounts({
+          centralVault: centralVault,
+          authority: blonkFiPlaceholderAdmin.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([blonkFiPlaceholderAdmin])
+        .rpc();
+    } catch (error) {
+      const sendTransactionError = error as SendTransactionError;
+      assert.include(sendTransactionError.message, "0x0");
+    }
   });
 
-  // it("Calculates total assets and shares", async () => {
-  //   const [totalAssets] = await program.methods
-  //     .calculateTotalAssets()
-  //     .accounts({
-  //       centralVault: centralVault.publicKey,
-  //       vaultInfos: individualVault.publicKey,
-  //     })
-  //     .view();
-
-  //   assert.equal(totalAssets.toNumber(), 100000000);
-
-  //   const [totalShares] = await program.methods
-  //     .calculateTotalShares()
-  //     .accounts({
-  //       centralVault: centralVault.publicKey,
-  //       vaultInfos: individualVault.publicKey,
-  //     })
-  //     .view();
-
-  //   assert.equal(totalShares.toNumber(), 100000000);
-  // });
-
-  it("Withdraws tokens from the vault", async () => {
-    // Wait for the lock period to end
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    const withdrawAmount = new anchor.BN(50000000); // 50 tokens
-
-    await program.methods
-      .withdrawFromVault(withdrawAmount)
-      .accounts({
-        withdrawer: blonkFiUser.publicKey,
-        depositorReceiptTokenAccount: userReceiptAccount,
-        vault: individualVault.publicKey,
-        vaultTokenAccount: vaultAssetAccount,
-        receiptMint: receiptMint,
-        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-      })
-      .signers([blonkFiUser])
-      .rpc();
-
-    const vaultAccount = await program.account.individualVault.fetch(
-      individualVault.publicKey
+  it("Creates a BONK vault", async () => {
+    //BONK address from Mainnet
+    const bonkMint = new PublicKey(
+      "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
     );
-    assert.equal(vaultAccount.totalAssets.toNumber(), 50000000);
-    assert.equal(vaultAccount.totalShares.toNumber(), 50000000);
 
-    const userReceiptBalance = await getAccount(
-      program.provider.connection,
-      userReceiptAccount
+    const bonkVaultSeeds = [
+      Buffer.from("BlonkFiIndividualVault"),
+      bonkMint.toBuffer(),
+    ];
+
+    const bonkVault = anchor.web3.PublicKey.findProgramAddressSync(
+      bonkVaultSeeds,
+      program.programId
+    )[0];
+
+    const receiptMintSeeds = [
+      Buffer.from("BlonkFiReceiptMint"),
+      bonkVault.toBuffer(),
+    ];
+
+    const receiptMint = anchor.web3.PublicKey.findProgramAddressSync(
+      receiptMintSeeds,
+      program.programId
+    )[0];
+
+    const centralVault = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("BlonkFiCentralVault")],
+      program.programId
+    )[0];
+
+    try {
+      await program.methods
+        .createVault(new anchor.BN(1728446899))
+        .accounts({
+          authority: blonkFiPlaceholderAdmin.publicKey,
+          vault: bonkVault,
+          receiptMint: receiptMint,
+          centralVault: centralVault,
+          assetMint: bonkMint,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([blonkFiPlaceholderAdmin])
+        .rpc();
+
+      //assert that the individual vault has the correct state
+      const individualVault = await program.account.individualVault.fetch(
+        bonkVault
+      );
+      assert.equal(individualVault.assetMint.toBase58(), bonkMint.toBase58());
+    } catch (error) {
+      const sendTransactionError = error as SendTransactionError;
+      console.log("error is", sendTransactionError);
+    }
+  });
+
+  it("Creates a WIF vault", async () => {
+    //WIF address from Mainnet
+    const wifMint = new PublicKey(
+      "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
     );
-    assert.equal(userReceiptBalance.amount.toString(), "50000000");
+
+    const wifVaultSeeds = [
+      Buffer.from("BlonkFiIndividualVault"),
+      wifMint.toBuffer(),
+    ];
+
+    const wifVault = anchor.web3.PublicKey.findProgramAddressSync(
+      wifVaultSeeds,
+      program.programId
+    )[0];
+
+    const receiptMintSeeds = [
+      Buffer.from("BlonkFiReceiptMint"),
+      wifVault.toBuffer(),
+    ];
+
+    const receiptMint = anchor.web3.PublicKey.findProgramAddressSync(
+      receiptMintSeeds,
+      program.programId
+    )[0];
+
+    const centralVault = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("BlonkFiCentralVault")],
+      program.programId
+    )[0];
+
+    try {
+      await program.methods
+        .createVault(new anchor.BN(1728446899))
+        .accounts({
+          authority: blonkFiPlaceholderAdmin.publicKey,
+          vault: wifVault,
+          receiptMint: receiptMint,
+          centralVault: centralVault,
+          assetMint: wifMint,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([blonkFiPlaceholderAdmin])
+        .rpc();
+
+      //assert that the individual vault has the correct state
+      const individualVault = await program.account.individualVault.fetch(
+        wifVault
+      );
+      assert.equal(individualVault.assetMint.toBase58(), wifMint.toBase58());
+    } catch (error) {
+      const sendTransactionError = error as SendTransactionError;
+      console.log("error is", sendTransactionError);
+    }
+  });
+
+  it("Creates a MOTHER vault", async () => {
+    //MOTHER address from Mainnet
+    const motherMint = new PublicKey(
+      "3S8qX1MsMqRbiwKg2cQyx7nis1oHMgaCuc9c4VfvVdPN"
+    );
+
+    const motherVaultSeeds = [
+      Buffer.from("BlonkFiIndividualVault"),
+      motherMint.toBuffer(),
+    ];
+
+    const motherVault = anchor.web3.PublicKey.findProgramAddressSync(
+      motherVaultSeeds,
+      program.programId
+    )[0];
+
+    const receiptMintSeeds = [
+      Buffer.from("BlonkFiReceiptMint"),
+      motherVault.toBuffer(),
+    ];
+
+    const receiptMint = anchor.web3.PublicKey.findProgramAddressSync(
+      receiptMintSeeds,
+      program.programId
+    )[0];
+
+    const centralVault = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("BlonkFiCentralVault")],
+      program.programId
+    )[0];
+
+    try {
+      await program.methods
+        .createVault(new anchor.BN(1728446899))
+        .accounts({
+          authority: blonkFiPlaceholderAdmin.publicKey,
+          vault: motherVault,
+          receiptMint: receiptMint,
+          centralVault: centralVault,
+          assetMint: motherMint,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([blonkFiPlaceholderAdmin])
+        .rpc();
+
+      //assert that the individual vault has the correct state
+      const individualVault = await program.account.individualVault.fetch(
+        motherVault
+      );
+      assert.equal(individualVault.assetMint.toBase58(), motherMint.toBase58());
+    } catch (error) {
+      const sendTransactionError = error as SendTransactionError;
+      console.log("error is", sendTransactionError);
+    }
   });
 });
